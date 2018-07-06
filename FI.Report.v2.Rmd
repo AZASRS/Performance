@@ -1,0 +1,1694 @@
+---
+title: "Private Debt and Opportunistic Debt IRRs"
+output: html_notebook
+---
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+library(PerformanceAnalytics)
+library(lubridate)
+library(scales)
+library(RColorBrewer)
+library(zoo)
+library(ggplot2)
+library(reshape2)
+library(knitr)
+library(tidyr)
+library(dplyr)
+library(xts)
+library(magrittr)
+library(xtable)
+library(gridExtra)
+library(grid)
+library(ggpubr)
+library(ggrepel)
+library(tcltk)
+library(tidyverse)
+
+source('P:/IMD/Karl/R projects/basic financial.r',echo=FALSE)
+load('P:/IMD/Karl/R projects/private investment performance/pmedata.rdata')
+pme.df$`Fund IRR`= pme.df$`Fund IRR`/100
+tomillions = function(x) x/1000000
+
+path.rds = "P:/IMD/JohnD/Fixed Income/R Projects/Performance/rds/"
+
+saveRDS(pme.df, file = paste0(path.rds,"pme.df.rds"))
+saveRDS(fundinfo, file = paste0(path.rds, "fundinfo.rds"))
+
+#test <- pme.df %>% filter(Portfolio == "OPP") %>% select("name", "Fund IRR", "Cash Adj NAV")
+```
+
+Set Dates
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+#-----Set end.date-----
+end.date <- ymd("2018-03-31")
+
+#Test that valdate is updated through previous quarter
+if (end.date != valdate + days(1) + months(3) - days(1)){
+   msgBox <- tkmessageBox(title = "Date Error",
+      message = "Check end.date", icon = "info", type = "ok")
+}
+as.of.note = paste("As of", format(end.date, "%B %d, %Y"))
+
+start.date <- end.date %m-% years(10)
+xts.range <- paste0(start.date, "/", end.date)
+#plot.range <- paste0(start.date + days(15), "/", end.date)
+
+range.1 <- paste0(end.date - years(1) + days(1), "/", end.date)
+range.3 <- paste0(end.date - years(3) + days(1), "/", end.date)
+range.5 <- paste0(end.date - years(5) + days(1), "/", end.date)
+
+JD.palette <- c("af1313", "d86868", "d6b41b", "7d9bce", "0720b2")
+```
+
+Public Market Data
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# nepc.dat is the raw NEPC data file
+nepc.dat <- read.csv("P:/IMD/Karl/R Projects/Public Performance/Data/CSVs/rNEPC.csv", stringsAsFactors = FALSE) %>%
+   mutate(ID = ShortName, Date = mdy(AsOf), NetReturn = NetReturn/100) %>%
+   filter(between(Date, start.date, end.date) & Period == "Monthly")
+
+#NEPC data does not include the EMD bench so it must be added from a seperate file
+emd.bench <- read.csv("P:/IMD/Karl/R projects/Public Performance/Data/CSVs/EMD.bench.csv", stringsAsFactors = FALSE) %>%
+   select(Date, EMD.BM) %>%
+   mutate(Date = mdy(Date), EMD.BM = EMD.BM/100)
+
+# nepc.map is the mapping file for nepc.dat
+nepc.map <- read.csv("P:/IMD/Karl/R Projects/Public Performance/Data/Mapping/NEPC.map.csv", stringsAsFactors = FALSE)
+```
+
+
+Get TF Multiplier
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+#Total Fund Benchmark - needed for loop
+b.tf <- filter(nepc.dat, ID == "RAY0001") %>% select(Date, NetReturn)
+b.tf.xts <- xts(b.tf[ ,-1], b.tf[ ,1])
+b.tf.xts <- b.tf.xts[xts.range,]
+
+tf.index <- as.vector(cumprod(1 + apply.quarterly(b.tf.xts, FUN = Return.cumulative)))
+tf.multiplier <- tf.index[length(tf.index)] / tf.index
+```
+
+
+Opportunistic Debt Market Values
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+od.short <- c("Total OPP", as.character(filter(fundinfo, Portfolio == "OPP")[,2]))
+
+od.short <- c("Total OPP", unlist(fundinfo %>% filter(Portfolio == "OPP") %>% select(Short)))
+
+mv.all <- list()
+cf.all <- list()
+
+for(i in od.short) {
+  cv <- y.v[[i]]
+  hv <- y.hv[[i]]
+  comb <- mergesum.z(cv, hv)
+  mv.all[[i]] <- comb
+  cf.all[[i]] <- y.cf[[i]]
+}
+
+od.pcaps <- do.call(merge, mv.all) %>% xts(.)
+
+if (index(od.pcaps[dim(od.pcaps)[1]]) != end.date) {
+   od.pcaps <- rbind(od.pcaps,xts(matrix(0, ncol = dim(od.pcaps)[2]), order.by = ymd(end.date)))
+}
+od.pcaps.lag <- lag.xts(od.pcaps, 1)
+od.range <- paste0(first(index(od.pcaps.lag)), "/", end.date)
+
+#od.cf <- do.call(merge, cf.all) %>%
+#   na.fill(., 0) %>%
+#   xts(.) %>%
+#   multiply_by(-1) %>%
+#   rbind(., xts(matrix(0, ncol = dim(od.pcaps)[2], nrow = dim(od.pcaps)[1]), order.by = ymd(index(od.pcaps))))
+
+od.cf <- do.call(merge, cf.all) %>%
+   na.fill(0) %>%
+   xts() %>%
+   multiply_by(-1) %>%
+   rbind(xts(matrix(0, ncol = dim(od.pcaps)[2], nrow = dim(od.pcaps)[1]), order.by = ymd(index(od.pcaps))))
+
+od.qtr.cf <- apply.quarterly(od.cf[paste0("/",end.date)], FUN = colSums) %>% .[od.range,]
+od.cf.adj <- na.fill(od.pcaps.lag,0) + na.fill(od.qtr.cf,0) %>% .[xts.range, ]
+
+   #Test: rowSums(od.pcaps.lag[,-1], na.rm = T)/od.pcaps.lag[,1]
+   #Test: rowSums(od.qtr.cf[,-1]) / od.qtr.cf[,1]
+   #Test: colnames(od.qtr.cf) == colnames(od.pcaps.lag)
+   #Test: dim(od.pcaps.lag) == dim(od.qtr.cf)
+   #Test: first(index(od.pcaps.lag)) == first(index(od.qtr.cf))
+   #Test: rowSums(od.cf.adj[,-1], na.rm = T)/od.cf.adj[,1]
+
+saveRDS(od.pcaps, file = paste0(path.rds,"od.pcaps.rds"))
+saveRDS(od.cf.adj, file = paste0(path.rds,"od.cf.adj.rds"))
+```
+
+Opp Debt Quarterly IRRs
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+date.range <- index(od.pcaps)
+od.irr.qtr = xts(matrix(0, ncol = dim(od.pcaps)[2], nrow = dim(od.pcaps)[1]), order.by = ymd(index(od.pcaps)))
+od.bench.qtr <- xts(matrix(0, ncol = 1, nrow = dim(od.pcaps)[1]), order.by = ymd(index(od.pcaps)))
+colnames(od.irr.qtr) <- od.short
+colnames(od.bench.qtr) <- "Benchmark"
+
+for(i in 1:length(od.short)) {
+   for (t in 2:length(date.range)){
+      b.mv <- od.pcaps[t-1, i]
+      e.mv <- od.pcaps[t, i]
+      cf.qtr <- y.cf[[od.short[i]]] %>% .[index(.) <= date.range[t]] %>% .[index(.) > date.range[t-1]]
+      cf.combine <- mergesum.z(-b.mv, cf.qtr, e.mv)
+      if (i == 1){
+         pe.data <- pestats(cf.combine, bench.lst$Fixed8[time(cf.combine)])
+         od.irr.qtr[t, i] <- pe.data$irr
+         od.bench.qtr[t, 1] <- pe.data$ind.irr
+      }
+      if (is.na(b.mv) == T | is.na(e.mv) == T) {
+         od.irr.qtr[t, i] <- NA
+      } else {
+         #od.irr.qtr[t, i] <- pestats(cf.combine, bench.lst$Fixed8[time(cf.combine)])$irr
+         od.irr.qtr[t, i] <- irr.z(cf.combine, gips = T)
+      }
+   }
+}
+od.irr.qtr <- merge.xts(od.irr.qtr[,1], od.bench.qtr, od.irr.qtr[,-1])  %>% .[paste0(date.range[2],"/"),]
+od.irr.qtr.lag <- lag.xts(od.irr.qtr, 1)
+
+saveRDS(od.irr.qtr, file = paste0(path.rds,"od.irr.qtr.rds"))
+saveRDS(od.irr.qtr.lag, file = paste0(path.rds,"od.irr.qtr.lag.rds"))
+```
+
+Opp Debt Rolling Annual IRRs
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+date.range <- index(od.pcaps)
+od.irr.year = xts(matrix(0, ncol = dim(od.pcaps)[2], nrow = dim(od.pcaps)[1]), order.by = ymd(index(od.pcaps)))
+od.bench.year <- xts(matrix(0, ncol = 1, nrow = dim(od.pcaps)[1]), order.by = ymd(index(od.pcaps)))
+colnames(od.irr.year) <- od.short
+colnames(od.bench.year) <- "Benchmark"
+
+for(i in 1:length(od.short)) {
+   for (t in 5:length(date.range)){
+      b.mv <- od.pcaps[(t-4), i]
+      e.mv <- od.pcaps[t, i]
+      cf.qtr <- y.cf[[od.short[i]]] %>% .[index(.) <= date.range[t]] %>% .[index(.) > date.range[t-4]]
+      cf.combine <- mergesum.z(-b.mv, cf.qtr, e.mv)
+      if (i == 1){
+         pe.data <- pestats(cf.combine, bench.lst$Fixed8[time(cf.combine)])
+         od.irr.year[t, i] <- pe.data$irr
+         od.bench.year[t, 1] <- pe.data$ind.irr
+      }
+            if (is.na(b.mv) == T | is.na(e.mv) == T) {
+         od.irr.year[t, i] <- NA
+      } else {
+         od.irr.year[t, i] <- irr.z(cf.combine, gips = T)
+      }
+   }   
+}
+od.irr.year <- merge.xts(od.irr.year[,1], od.bench.year, od.irr.year[,-1])  %>% .[paste0(date.range[6],"/"),]
+od.irr.year.lag <- lag.xts(od.irr.year, 1)
+
+saveRDS(od.irr.year, file = paste0(path.rds,"od.irr.year.rds"))
+saveRDS(od.irr.year.lag, file = paste0(path.rds,"od.irr.year.lag.rds"))
+```
+
+Opp Debt Rolling Three Year IRRs
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+date.range <- index(od.pcaps)
+od.irr.three = xts(matrix(0, ncol = dim(od.pcaps)[2], nrow = dim(od.pcaps)[1]), order.by = ymd(index(od.pcaps)))
+od.bench.three <- xts(matrix(0, ncol = 1, nrow = dim(od.pcaps)[1]), order.by = ymd(index(od.pcaps)))
+colnames(od.irr.three) <- od.short
+colnames(od.bench.three) <- "Benchmark"
+
+for(i in 1:length(od.short)) {
+   for (t in 13:length(date.range)){
+      b.mv <- od.pcaps[(t-12), i]
+      e.mv <- od.pcaps[t, i]
+      cf.qtr <- y.cf[[od.short[i]]] %>% .[index(.) <= date.range[t]] %>% .[index(.) > date.range[t-12]]
+      cf.combine <- mergesum.z(-b.mv, cf.qtr, e.mv)
+      if (i == 1){
+         pe.data <- pestats(cf.combine, bench.lst$Fixed8[time(cf.combine)])
+         od.irr.three[t, i] <- pe.data$irr
+         od.bench.three[t, 1] <- pe.data$ind.irr
+      }
+      if (is.na(b.mv) == T | is.na(e.mv) == T) {
+         od.irr.three[t, i] <- NA
+      } else {
+         od.irr.three[t, i] <- irr.z(cf.combine, gips = T)
+      }
+   }   
+}
+od.irr.three <- merge.xts(od.irr.three[,1], od.bench.three, od.irr.three[,-1]) %>% .[paste0(date.range[14],"/"),]
+od.irr.three.lag <- lag.xts(od.irr.three, 1) 
+
+saveRDS(od.irr.three, file = paste0(path.rds,"od.irr.three.rds"))
+saveRDS(od.irr.three.lag, file = paste0(path.rds,"od.irr.three.lag.rds"))
+```
+
+Opp Debt Rolling Five Year IRRs
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+date.range <- index(od.pcaps)
+od.irr.five = xts(matrix(0, ncol = dim(od.pcaps)[2], nrow = dim(od.pcaps)[1]), order.by = ymd(index(od.pcaps)))
+od.bench.five <- xts(matrix(0, ncol = 1, nrow = dim(od.pcaps)[1]), order.by = ymd(index(od.pcaps)))
+colnames(od.irr.five) <- od.short
+colnames(od.bench.five) <- "Benchmark"
+
+for(i in 1:length(od.short)) {
+   for (t in 21:length(date.range)){
+      b.mv <- od.pcaps[(t-20), i]
+      e.mv <- od.pcaps[t, i]
+      cf.qtr <- y.cf[[od.short[i]]] %>% .[index(.) <= date.range[t]] %>% .[index(.) > date.range[t-20]]
+      cf.combine <- mergesum.z(-b.mv, cf.qtr, e.mv)
+      if (i == 1){
+         pe.data <- pestats(cf.combine, bench.lst$Fixed8[time(cf.combine)])
+         od.irr.five[t, i] <- pe.data$irr
+         od.bench.five[t, 1] <- pe.data$ind.irr
+      }
+      if (is.na(b.mv) == T | is.na(e.mv) == T) {
+         od.irr.five[t, i] <- NA
+      } else {
+         od.irr.five[t, i] <- irr.z(cf.combine, gips = T)
+      }
+   }   
+}
+od.irr.five <- merge.xts(od.irr.five[,1], od.bench.five, od.irr.five[,-1]) %>% .[paste0(date.range[22],"/"),]
+od.irr.five.lag <- lag.xts(od.irr.five, 1)
+
+saveRDS(od.irr.five, file = paste0(path.rds,"od.irr.five.rds"))
+saveRDS(od.irr.five.lag, file = paste0(path.rds,"od.irr.five.lag.rds"))
+```
+
+Opp Debt Rolling ITD Year IRRs
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+date.range <- index(od.pcaps)
+od.irr.itd = xts(matrix(0, ncol = dim(od.pcaps)[2], nrow = dim(od.pcaps)[1]), order.by = ymd(index(od.pcaps)))
+od.bench.itd <- xts(matrix(0, ncol = 1, nrow = dim(od.pcaps)[1]), order.by = ymd(index(od.pcaps)))
+colnames(od.irr.itd) <- od.short
+colnames(od.bench.itd) <- "Benchmark"
+
+for(i in 1:length(od.short)) {
+   for (t in 1:length(date.range)){
+      e.mv <- od.pcaps[t, i]
+      cf.qtr <- y.cf[[od.short[i]]] %>% .[index(.) <= date.range[t]]
+      cf.combine <- mergesum.z(cf.qtr, e.mv)
+      if (i == 1){
+         pe.data <- pestats(cf.combine, bench.lst$Fixed8[time(cf.combine)])
+         od.irr.itd[t, i] <- pe.data$irr
+         od.bench.itd[t, 1] <- pe.data$ind.irr
+      }
+      if (is.na(e.mv) == T) {
+         od.irr.itd[t, i] <- NA
+      } else {
+         od.irr.itd[t, i] <- irr.z(cf.combine, gips = T)
+      }
+   }   
+}
+od.irr.itd <- merge.xts(od.irr.itd[,1], od.bench.itd, od.irr.itd[,-1]) %>% .[paste0(date.range[1],"/"),]
+od.irr.itd.lag <- lag.xts(od.irr.itd, 1)
+
+saveRDS(od.irr.itd, file = paste0(path.rds,"od.irr.itd.rds"))
+saveRDS(od.irr.itd.lag, file = paste0(path.rds,"od.irr.itd.lag.rds"))
+```
+
+Private Debt Market Values
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+pd.short <- c("Total PD", as.character(filter(fundinfo, Portfolio == "PD")[,2]))
+
+test <- filter(fundinfo, Portfolio == "PD") %>%
+   select(Short)
+   
+
+
+mv.all <- list()
+cf.all <- list()
+
+for(i in pd.short) {
+  cv <- y.v[[i]]
+  hv <- y.hv[[i]]
+  comb <- mergesum.z(cv, hv)
+  mv.all[[i]] <- comb
+  cf.all[[i]] <- y.cf[[i]]
+}
+
+pd.pcaps <- do.call(merge, mv.all) %>% xts(.)
+   #Test: rowSums(pd.pcaps.lag[,-1], na.rm = T)/pd.pcaps.lag[,1]
+
+if (index(pd.pcaps[dim(pd.pcaps)[1]]) != end.date) {
+   pd.pcaps <- rbind(pd.pcaps,xts(matrix(0, ncol = dim(pd.pcaps)[2]), order.by = ymd(end.date)))
+}
+pd.pcaps.lag <- lag.xts(pd.pcaps, 1)
+pd.range <- paste0(first(index(pd.pcaps.lag)), "/", end.date)
+
+pd.cf <- do.call(merge, cf.all) %>%
+   na.fill(., 0) %>%
+   xts(.) %>%
+   multiply_by(-1) %>%
+   rbind(., xts(matrix(0, ncol = dim(pd.pcaps)[2], nrow = dim(pd.pcaps)[1]), order.by = ymd(index(pd.pcaps))))
+
+pd.qtr.cfs <- apply.quarterly(pd.cf, FUN = colSums) %>%
+   .[pd.range,]
+pd.cf.adj <- na.fill(pd.pcaps.lag,0) + na.fill(pd.qtr.cfs,0) %>% .[xts.range, ]
+   #Test: rowSums(pd.qtr.cfs[,-1]) / pd.qtr.cfs[,1]
+   #Test: colnames(pd.qtr.cfs) == colnames(pd.pcaps.lag)
+   #Test: rowSums(pd.cf.adj[,-1], na.rm = T)/pd.cf.adj[,1]
+   #Test: dim(pd.qtr.cfs)[2] == sum(colnames(pd.qtr.cfs) == colnames(pd.pcaps.lag))
+pd.adj.current <- pd.cf.adj
+
+saveRDS(pd.pcaps, file = paste0(path.rds,"pd.pcaps.rds"))
+saveRDS(pd.cf.adj, file = paste0(path.rds,"pd.cf.adj.rds"))
+```
+
+Private Debt Quarterly IRRs
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+date.range <- index(pd.pcaps)
+pd.irr.qtr = xts(matrix(0, ncol = dim(pd.pcaps)[2], nrow = dim(pd.pcaps)[1]), order.by = ymd(index(pd.pcaps)))
+pd.bench.qtr <- xts(matrix(0, ncol = 1, nrow = dim(pd.pcaps)[1]), order.by = ymd(index(pd.pcaps)))
+colnames(pd.irr.qtr) <- pd.short
+colnames(pd.bench.qtr) <- "Benchmark"
+
+for(i in 1:length(pd.short)) {
+   for (t in 2:length(date.range)){
+      b.mv <- pd.pcaps[t-1, i]
+      e.mv <- pd.pcaps[t, i]
+      cf.qtr <- y.cf[[pd.short[i]]] %>% .[index(.) <= date.range[t]] %>% .[index(.) > date.range[t-1]]
+      cf.combine <- mergesum.z(-b.mv, cf.qtr, e.mv)
+      if (i == 1){
+         pe.data <- pestats(cf.combine, bench.lst$LevLoan.250[time(cf.combine)])
+         pd.irr.qtr[t, i] <- pe.data$irr
+         pd.bench.qtr[t, 1] <- pe.data$ind.irr
+      }
+      if (is.na(b.mv) == T | is.na(e.mv) == T) {
+         pd.irr.qtr[t, i] <- NA
+      } else {
+         pd.irr.qtr[t, i] <- irr.z(cf.combine, gips = T)
+      }
+   }
+}
+pd.irr.qtr <- merge.xts(pd.irr.qtr[,1], pd.bench.qtr, pd.irr.qtr[,-1])  %>% .[paste0(date.range[2],"/"),]
+pd.irr.qtr.lag <- lag.xts(pd.irr.qtr, 1)
+
+saveRDS(pd.irr.qtr, file = paste0(path.rds,"pd.irr.qtr.rds"))
+saveRDS(pd.irr.qtr.lag, file = paste0(path.rds,"pd.irr.qtr.lag.rds"))
+```
+
+Private Debt Rolling Annual IRRs
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+date.range <- index(pd.pcaps)
+pd.irr.year = xts(matrix(0, ncol = dim(pd.pcaps)[2], nrow = dim(pd.pcaps)[1]), order.by = ymd(index(pd.pcaps)))
+pd.bench.year <- xts(matrix(0, ncol = 1, nrow = dim(pd.pcaps)[1]), order.by = ymd(index(pd.pcaps)))
+colnames(pd.irr.year) <- pd.short
+colnames(pd.bench.year) <- "Benchmark"
+
+for(i in 1:length(pd.short)) {
+   for (t in 5:length(date.range)){
+      b.mv <- pd.pcaps[(t-4), i]
+      e.mv <- pd.pcaps[t, i]
+      cf.qtr <- y.cf[[pd.short[i]]] %>% .[index(.) <= date.range[t]] %>% .[index(.) > date.range[t-4]]
+      cf.combine <- mergesum.z(-b.mv, cf.qtr, e.mv)
+      if (i == 1){
+         pe.data <- pestats(cf.combine, bench.lst$LevLoan.250[time(cf.combine)])
+         pd.irr.year[t, i] <- pe.data$irr
+         pd.bench.year[t, 1] <- pe.data$ind.irr
+      }
+            if (is.na(b.mv) == T | is.na(e.mv) == T) {
+         pd.irr.year[t, i] <- NA
+      } else {
+         pd.irr.year[t, i] <- irr.z(cf.combine, gips = T)
+      }
+   }   
+}
+pd.irr.year <- merge.xts(pd.irr.year[,1], pd.bench.year, pd.irr.year[,-1])  %>% .[paste0(date.range[6],"/"),]
+pd.irr.year.lag <- lag.xts(pd.irr.year, 1)
+
+saveRDS(pd.irr.year, file = paste0(path.rds,"pd.irr.year.rds"))
+saveRDS(pd.irr.year.lag, file = paste0(path.rds,"pd.irr.year.lag.rds"))
+```
+
+Private Debt Rolling Three Year IRRs
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+date.range <- index(pd.pcaps)
+pd.irr.three = xts(matrix(0, ncol = dim(pd.pcaps)[2], nrow = dim(pd.pcaps)[1]), order.by = ymd(index(pd.pcaps)))
+pd.bench.three <- xts(matrix(0, ncol = 1, nrow = dim(pd.pcaps)[1]), order.by = ymd(index(pd.pcaps)))
+colnames(pd.irr.three) <- pd.short
+colnames(pd.bench.three) <- "Benchmark"
+
+for(i in 1:length(pd.short)) {
+   for (t in 13:length(date.range)){
+      b.mv <- pd.pcaps[(t-12), i]
+      e.mv <- pd.pcaps[t, i]
+      cf.qtr <- y.cf[[pd.short[i]]] %>% .[index(.) <= date.range[t]] %>% .[index(.) > date.range[t-12]]
+      cf.combine <- mergesum.z(-b.mv, cf.qtr, e.mv)
+      if (i == 1){
+         pe.data <- pestats(cf.combine, bench.lst$LevLoan.250[time(cf.combine)])
+         pd.irr.three[t, i] <- pe.data$irr
+         pd.bench.three[t, 1] <- pe.data$ind.irr
+      }
+      if (is.na(b.mv) == T | is.na(e.mv) == T) {
+         pd.irr.three[t, i] <- NA
+      } else {
+         pd.irr.three[t, i] <- irr.z(cf.combine, gips = T)
+      }
+   }   
+}
+pd.irr.three <- merge.xts(pd.irr.three[,1], pd.bench.three, pd.irr.three[,-1]) %>% .[paste0(date.range[14],"/"),]
+pd.irr.three.lag <- lag.xts(pd.irr.three, 1) 
+
+saveRDS(pd.irr.three, file = paste0(path.rds,"pd.irr.three.rds"))
+saveRDS(pd.irr.three.lag, file = paste0(path.rds,"pd.irr.three.lag.rds"))
+```
+
+Private Debt Rolling Five Year IRRs
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+date.range <- index(pd.pcaps)
+pd.irr.five = xts(matrix(0, ncol = dim(pd.pcaps)[2], nrow = dim(pd.pcaps)[1]), order.by = ymd(index(pd.pcaps)))
+pd.bench.five <- xts(matrix(0, ncol = 1, nrow = dim(pd.pcaps)[1]), order.by = ymd(index(pd.pcaps)))
+colnames(pd.irr.five) <- pd.short
+colnames(pd.bench.five) <- "Benchmark"
+
+for(i in 1:length(pd.short)) {
+   for (t in 21:length(date.range)){
+      b.mv <- pd.pcaps[(t-20), i]
+      e.mv <- pd.pcaps[t, i]
+      cf.qtr <- y.cf[[pd.short[i]]] %>% .[index(.) <= date.range[t]] %>% .[index(.) > date.range[t-20]]
+      cf.combine <- mergesum.z(-b.mv, cf.qtr, e.mv)
+      if (i == 1){
+         pe.data <- pestats(cf.combine, bench.lst$LevLoan.250[time(cf.combine)])
+         pd.irr.five[t, i] <- pe.data$irr
+         pd.bench.five[t, 1] <- pe.data$ind.irr
+      }
+      if (is.na(b.mv) == T | is.na(e.mv) == T) {
+         pd.irr.five[t, i] <- NA
+      } else {
+         pd.irr.five[t, i] <- irr.z(cf.combine, gips = T)
+      }
+   }   
+}
+pd.irr.five <- merge.xts(pd.irr.five[,1], pd.bench.five, pd.irr.five[,-1]) %>% .[paste0(date.range[22],"/"),]
+pd.irr.five.lag <- lag.xts(pd.irr.five, 1)
+
+saveRDS(pd.irr.five, file = paste0(path.rds,"pd.irr.five.rds"))
+saveRDS(pd.irr.five.lag, file = paste0(path.rds,"pd.irr.five.lag.rds"))
+```
+
+Private Debt Rolling ITD Year IRRs
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+date.range <- index(pd.pcaps)
+pd.irr.itd = xts(matrix(0, ncol = dim(pd.pcaps)[2], nrow = dim(pd.pcaps)[1]), order.by = ymd(index(pd.pcaps)))
+pd.bench.itd <- xts(matrix(0, ncol = 1, nrow = dim(pd.pcaps)[1]), order.by = ymd(index(pd.pcaps)))
+colnames(pd.irr.itd) <- pd.short
+colnames(pd.bench.itd) <- "Benchmark"
+
+for(i in 1:length(pd.short)) {
+   for (t in 1:length(date.range)){
+      e.mv <- pd.pcaps[t, i]
+      cf.qtr <- y.cf[[pd.short[i]]] %>% .[index(.) <= date.range[t]]
+      cf.combine <- mergesum.z(cf.qtr, e.mv)
+      if (i == 1){
+         pe.data <- pestats(cf.combine, bench.lst$LevLoan.250[time(cf.combine)])
+         pd.irr.itd[t, i] <- pe.data$irr
+         pd.bench.itd[t, 1] <- pe.data$ind.irr
+      }
+      if (is.na(e.mv) == T) {
+         pd.irr.itd[t, i] <- NA
+      } else {
+         pd.irr.itd[t, i] <- irr.z(cf.combine, gips = T)
+      }
+   }   
+}
+pd.irr.itd <- merge.xts(pd.irr.itd[,1], pd.bench.itd, pd.irr.itd[,-1]) %>% .[paste0(date.range[1],"/"),]
+pd.irr.itd.lag <- lag.xts(pd.irr.itd, 1)
+
+saveRDS(pd.irr.itd, file = paste0(path.rds,"pd.irr.itd.rds"))
+saveRDS(pd.irr.itd.lag, file = paste0(path.rds,"pd.irr.itd.lag.rds"))
+```
+
+This is for Al to be able to easily see IRRs - Replace with Shiny App 
+```{r}
+path = "P:/IMD/JohnD/Fixed Income/Private Markets/IRRs/"
+
+file = "PD.Quarterly.IRRs.csv"
+write_delim(data.frame(index(pd.irr.qtr),coredata(pd.irr.qtr)), path = paste0(path, file), delim = "," )
+
+file = "PD.1_Year.IRRs.csv"
+write_delim(data.frame(index(pd.irr.year),coredata(pd.irr.year)), path = paste0(path, file), delim = "," )
+
+file = "PD.3_Year.IRRs.csv"
+write_delim(data.frame(index(pd.irr.three),coredata(pd.irr.three)), path = paste0(path, file), delim = "," )
+
+file = "OD.Quarterly.IRRs.csv"
+write_delim(data.frame(index(od.irr.qtr),coredata(od.irr.qtr)), path = paste0(path, file), delim = "," )
+
+file = "OD.1_Year.IRRs.csv"
+write_delim(data.frame(index(od.irr.year),coredata(od.irr.year)), path = paste0(path, file), delim = "," )
+
+file = "OD.3_Year.IRRs.csv"
+write_delim(data.frame(index(od.irr.three),coredata(od.irr.three)), path = paste0(path, file), delim = "," )
+```
+
+Total Fixed Income
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+#Total Fixed Income
+
+#Opportunistic Debt
+od.short <- c("Total OPP", as.character(filter(fundinfo, Portfolio == "OPP")[,2]))
+od.pcaps <- readRDS(paste0(path.rds,"od.pcaps.rds"))
+od.cf.adj <- readRDS(paste0(path.rds,"od.cf.adj.rds"))
+
+#Private Debt
+pd.short <- c("Total PD", as.character(filter(fundinfo, Portfolio == "PD")[,2]))
+pd.pcaps <- readRDS(paste0(path.rds,"pd.pcaps.rds"))
+pd.cf.adj <- readRDS(paste0(path.rds,"pd.cf.adj.rds"))
+
+
+total.fixed.id <- c("RAY0013","RAY0035","ASRSPD","RAY0015", "RAYEMD")
+tfi.names <- c("Core","High Yield","Private Debt","Opp Debt","EM Debt")
+private.id <- c("ASRSPD","TEST")
+
+r.all.list <- list()   
+b.all.list <- list()
+mv.all.list <- list()
+ex.all.list <- list()
+i.date.list <- list()
+dva.all.list <- list()
+
+for(c in total.fixed.id) {
+   name <- nepc.map[which(nepc.map$ID == c), 'Short.Name']
+   
+   r <- subset(nepc.dat, nepc.dat$ID == c & nepc.dat$Period == "Monthly", select = c('Date','NetReturn'))
+   r.xts <- xts(r[,-1], r[,1])
+   r.xts <- r.xts[!is.na(r.xts),]
+   r.xts <- r.xts[!duplicated(index(r.xts)), ]
+   r.xts <- r.xts[xts.range,]
+   i.d <- as.character(time(r.xts)[1])
+   r.monthly <- r.xts
+   if (c %in% private.id){
+      r.xts <- apply.quarterly(r.xts, FUN = colSums)
+   } else {
+      r.xts <- apply.quarterly(r.xts, FUN = Return.cumulative)
+   }
+   r.all.list[[name]] <- r.xts
+   
+   b.id <- nepc.map[which(nepc.map$ID == c), 'BM.ID']
+   b <- subset(nepc.dat, nepc.dat$ID == b.id, select = c('Date','NetReturn'))
+      if (c == "RAYEMD"){b <- emd.bench}  #EMD Bench is not in data
+   b.xts <- xts(b[ ,-1], b[ ,1])
+   b.xts <- b.xts[paste0(i.d,"/"), ]
+   b.xts = b.xts[xts.range, ]
+   b.monthly <- b.xts
+   if (c == "ASRSPD"){
+      b.xts <- apply.quarterly(b.xts, FUN = colSums)
+   } else {
+      b.xts <- apply.quarterly(b.xts, FUN = Return.cumulative)
+   }
+   b.all.list[[name]] <- b.xts
+   
+   mv <- subset(nepc.dat, nepc.dat$ID == c, select = c('Date','MthEndMV'))
+   mv.xts <- xts(mv[,-1], mv[,1])
+   mv.xts <- mv.xts[!duplicated(index(mv.xts)), ]
+   mv.xts <- mv.xts[xts.range,]
+   mv.monthly <- lag.xts(mv.xts, 1)
+   mv.xts <- period.apply(mv.xts, INDEX = endpoints(mv.xts, 'quarters'), FUN = last)
+      if (c == "ASRSPD"){ mv.xts <- pd.cf.adj[, 1]}
+      if (c == "RAY0015"){ mv.xts <- od.cf.adj[, 1]}
+   mv.all.list[[name]] <- tomillions(mv.xts)
+   
+   ex.all.list[[name]] <- r.xts - b.xts
+   
+   i.date.list[[name]] <- ymd(i.d)
+   
+   dva.all.list[[name]] <- mv.monthly * (r.monthly - b.monthly)
+}
+
+r.all <- do.call(merge, r.all.list) %>% 
+   set_colnames(tfi.names)
+r.all["/2008-04-15",4] <- NA     #Opp Debt Adjustment
+r.all["2015-05-30/",5] <- NA     #EMD Adjustment
+
+b.all <- do.call(merge, b.all.list) %>% 
+   set_colnames(tfi.names)
+
+mv.all <- do.call(merge, mv.all.list) %>%
+   set_colnames(tfi.names)
+
+ex.all <- do.call(merge, ex.all.list) %>% 
+   set_colnames(tfi.names)
+
+dva.all <- do.call(merge, dva.all.list) %>%
+   apply.quarterly(., FUN = colSums) %>%
+   tomillions(.) %>%
+   set_colnames(tfi.names)
+
+end.qtr <- dim(r.all)[1]
+```
+
+@knitr tfi.return.table
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+#Total Fixed Income Output
+name.vector <- c(
+   "Core Fixed Income","Barclay's Aggregate","Core Composite Excess",
+   "High Yield", "Barclay's HY Index", "HY Composite Excess",
+   "Private Debt","S&P/LSTA Leveraged Loan + 250bps","Private Debt Excess",
+   "Opportunistic Debt", "Fixed 8% Return", "Opportunistic Debt Excess"
+)
+
+one.vector <- c(
+   Return.annualized(r.all[range.1,1]),
+   Return.annualized(b.all[range.1,1]),
+   Return.annualized(r.all[range.1,1]) - Return.annualized(b.all[range.1,1]),
+   
+   Return.annualized(r.all[range.1,2]),
+   Return.annualized(b.all[range.1,2]),
+   Return.annualized(r.all[range.1,2]) - Return.annualized(b.all[range.1,2]),
+   
+   pd.irr.year.lag[end.date,1],
+   pd.irr.year.lag[end.date,2],
+   pd.irr.year.lag[end.date,1] - pd.irr.year.lag[end.date,2],
+   
+   od.irr.year.lag[end.date,1],
+   od.irr.year.lag[end.date,2],
+   od.irr.year.lag[end.date,1] - od.irr.year.lag[end.date,2]
+)
+
+three.vector <- c(
+   Return.annualized(r.all[range.3,1]),
+   Return.annualized(b.all[range.3,1]),
+   Return.annualized(r.all[range.3,1]) - Return.annualized(b.all[range.3,1]),
+   
+   Return.annualized(r.all[range.3,2]),
+   Return.annualized(b.all[range.3,2]),
+   Return.annualized(r.all[range.3,2]) - Return.annualized(b.all[range.3,2]),
+   
+   pd.irr.three.lag[end.date,1],
+   pd.irr.three.lag[end.date,2],
+   pd.irr.three.lag[end.date,1] - pd.irr.three.lag[end.date,2],
+   
+   od.irr.three.lag[end.date,1],
+   od.irr.three.lag[end.date,2],
+   od.irr.three.lag[end.date,1]- od.irr.three.lag[end.date,2]
+)
+
+five.vector <- c(
+   Return.annualized(r.all[range.5,1]),
+   Return.annualized(b.all[range.5,1]),
+   Return.annualized(r.all[range.5,1]) - Return.annualized(b.all[range.5,1]),
+   
+   Return.annualized(r.all[range.5,2]),
+   Return.annualized(b.all[range.5,2]),
+   Return.annualized(r.all[range.5,2]) - Return.annualized(b.all[range.5,2]),
+   
+   pd.irr.five.lag[end.date,1],
+   pd.irr.five.lag[end.date,2],
+   pd.irr.five.lag[end.date,1] - pd.irr.five.lag[end.date,2],
+   
+   od.irr.five.lag[end.date,1],
+   od.irr.five.lag[end.date,2],
+   od.irr.five.lag[end.date,1] - od.irr.five.lag[end.date,2]
+)
+
+tfi.return.table <- data.frame(
+   one.vector,
+   three.vector,
+   five.vector) %>%
+   set_colnames(c("1 Year", "3 Year", "5 Year")) %>%
+   set_rownames(name.vector) %>%
+   round(digits = 4) %>%
+   multiply_by(100)
+
+saveRDS(tfi.return.table, file = paste0(path.rds,"tfi.return.table"))
+```
+
+@knitr plot.mv.tfi
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+plot.mv.tfi <- ggplot(
+   data = fortify.zoo(mv.all[range.5,]/1000, melt = TRUE),
+   aes(x = Index, y = Value, fill = Series)) +
+   geom_col(position = "stack") +
+   ggtitle("Total Fixed Income Market Values") +
+   ylab("in Billions")  + xlab("") + 
+   scale_x_date(date_breaks = "1 year", labels = date_format("%Y")) +
+   scale_fill_manual(values = IMD.palette()) +
+   guides(fill = guide_legend(title = "")) +
+   theme(plot.title = element_text(hjust = 0.5, size = 10, face = "bold"),
+         plot.subtitle = element_text(hjust = 0.5, size = 10),
+         axis.title.y = element_text(size = 8, face = "italic"),
+         legend.position="bottom", legend.box.spacing = unit(0, "cm"),
+         legend.text = element_text(size = 7), legend.key.size = unit(.25, "cm"),
+         axis.text.x = element_text(size = 6, face = "bold"), axis.text.y = element_text(size = 6, face = "bold"))
+
+saveRDS(plot.mv.tfi, file = paste0(path.rds,"plot.mv.tfi"))
+print(plot.mv.tfi)
+```
+
+@knitr plot.tfi.roll
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+r.tfi.roll <- merge(
+   rollapply(na.trim(r.all[,1]), width = 4, FUN = "Return.annualized", scale = 4),
+   rollapply(na.trim(r.all[,2]), width = 4, FUN = "Return.annualized", scale = 4),
+   rollapply(na.trim(r.all[,3]), width = 4, FUN = "Return.annualized", scale = 4),
+   rollapply(na.trim(r.all[,4]), width = 4, FUN = "Return.annualized", scale = 4))
+
+r.tfi.roll <- r.tfi.roll[range.5,]
+colnames(r.tfi.roll) <- tfi.names[-5]
+
+
+plot.tfi.roll <- ggplot(
+   data = fortify.zoo(r.tfi.roll, melt = TRUE), 
+   aes(x = Index, y = Value, stat = Series, colour = Series)) +
+   geom_line(size = .5) +
+   xlab("") + scale_y_continuous(name = "Annualized Return", labels = scales::percent) +
+   ggtitle("Total Fixed Income Rolling Returns",
+           subtitle = paste("One Year Trailing Returns through",format(end.date, "%B %d, %Y"))) +
+   scale_color_manual(values = IMD.palette(), name = element_blank()) +
+   theme(plot.title = element_text(hjust = 0.5, size = 8, face = "bold"),
+         plot.subtitle = element_text(hjust = 0.5, size = 6),
+         axis.title.y = element_text(size = 6, face = "italic"), 
+         legend.text = element_text(size = 7), legend.key.size = unit(.25, "cm"),
+         axis.text.x = element_text(size = 6, face = "bold"), axis.text.y = element_text(size = 6, face = "bold"))
+
+saveRDS(plot.tfi.roll, file = paste0(path.rds,"plot.tfi.roll"))
+print(plot.tfi.roll)
+```
+
+
+Total Fixed Income DVA Plot
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+tfi.dva <- apply.quarterly(dva.all, FUN = "colSums")
+
+plot.tfi.dva <- ggplot(
+   data = fortify.zoo(dva.all[range.5,], melt = TRUE),
+   aes(x = Index, y = Value, fill = Series)) +
+   geom_col(position = "stack") +
+   ggtitle("") +
+   ylab("in Millions") + xlab("") + scale_y_continuous(labels = scales::dollar) +
+   scale_x_date(date_breaks = "1 year", labels = date_format("%Y")) +
+   scale_fill_manual(values=IMD.palette(), name = "Asset Class:") +
+   theme(plot.title = element_text(hjust = 0.5, size = 12, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, size = 10),
+        axis.title.y = element_text(size = 10, face = "italic"),
+        legend.background = element_rect(fill="gray92", size=4.5, linetype="dotted"))
+
+
+saveRDS(plot.tfi.dva, file = paste0(path.rds,"plot.tfi.dva"))
+print(plot.tfi.dva)
+```
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+end.qtr <- dim(tfi.dva)[1]
+
+tfi.dva.summary.long <- data.frame(
+  colSums(tfi.dva[(end.qtr- 3):end.qtr,], na.rm = TRUE),
+  colSums(tfi.dva[(end.qtr-11):end.qtr,], na.rm = TRUE),
+  colSums(tfi.dva[(end.qtr-19):end.qtr,], na.rm = TRUE)
+) %>%
+  set_colnames(c("One Year","Three Year","Five Year")) %>%
+  mutate(Asset.Class = rownames(.)) %>%
+  gather(Period, DVA, -Asset.Class) %>%
+  mutate(Period = factor(Period, levels = c("One Year","Three Year","Five Year"))) %>%
+  mutate(Asset.Class = factor(Asset.Class, levels = c("Core", "High Yield", "Private Debt", "Opp Debt", "EM Debt")))
+
+plot.tfi.dva.long <- ggplot(tfi.dva.summary.long, aes(x = Period, y = DVA, fill = Asset.Class)) +
+   geom_bar(stat = "identity") +
+   ggtitle("") +
+   ylab("in Millions") + xlab("") + scale_y_continuous(labels = scales::dollar) +
+   scale_fill_manual(values=IMD.palette(), name = "Asset Class:") +
+   theme(plot.title = element_text(hjust = 0.5, size = 12, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, size = 10),
+        axis.title.y = element_text(size = 10, face = "italic"),
+        legend.background = element_rect(fill="gray92", size=4.5, linetype="dotted"))
+
+saveRDS(plot.tfi.dva.long, file = paste0(path.rds,"plot.tfi.dva.long"))
+print(plot.tfi.dva.long)
+```
+
+
+@knitr plot.r.tfi.5yr
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+plot.r.tfi.5yr <- ggplot(
+   data = fortify.zoo(r.all[range.5,-5], melt = TRUE),
+   aes(x = Index, fill = Series, y = Value)) +
+   
+   geom_col(position = "dodge") +
+   ggtitle("Total Fixed Income Quarterly Return") +
+   ylab("") + xlab("") + 
+   scale_y_continuous(name = "Quarterly Return", labels = scales::percent) +
+   scale_x_date(date_breaks = "1 year", labels = date_format("%Y")) +
+   scale_fill_manual(values = IMD.palette()) +
+   guides(fill = guide_legend(title = "")) +
+   theme(plot.title = element_text(hjust = 0.5, size = 8, face = "bold"),
+         plot.subtitle = element_text(hjust = 0.5, size = 10),
+         axis.title.y = element_text(size = 7, face = "italic"),
+         legend.position="bottom", legend.box.spacing = unit(0, "cm"),
+         legend.text = element_text(size = 7), legend.key.size = unit(.25, "cm"),
+         axis.text.x = element_text(size = 6, face = "bold"), axis.text.y = element_text(size = 6, face = "bold"))
+
+saveRDS(plot.r.tfi.5yr, file = paste0(path.rds,"plot.r.tfi.5yr"))
+print(plot.r.tfi.5yr)
+```
+
+@knitr plot.ex.tfi.5yr
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+plot.ex.tfi.5yr <- ggplot(
+   data = fortify.zoo(ex.all[range.5,-5], melt = TRUE),
+   aes(x = Index, fill = Series, y = Value)) +
+   
+   geom_col(position = "dodge") +
+   ggtitle("Total Fixed Income Quarterly Excess Return") +
+   ylab("") + xlab("") + 
+   scale_y_continuous(name = "Excess Return", labels = scales::percent) +
+   scale_x_date(date_breaks = "1 year", labels = date_format("%Y")) +
+   scale_fill_manual(values = IMD.palette()) +
+   guides(fill = guide_legend(title = "")) +
+   theme(plot.title = element_text(hjust = 0.5, size = 8, face = "bold"),
+         plot.subtitle = element_text(hjust = 0.5, size = 10),
+         axis.title.y = element_text(size = 7, face = "italic"),
+         legend.position="", legend.text = element_text(size = 8), legend.key.size = unit(.25, "cm"),
+         axis.text.x = element_text(size = 6, face = "bold"), axis.text.y = element_text(size = 6, face = "bold"))
+
+saveRDS(plot.ex.tfi.5yr, file = paste0(path.rds,"plot.ex.tfi.5yr"))
+print(plot.ex.tfi.5yr)
+```
+
+Interest Rate Sensitive
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+irs.id <- c("RAY0013","RAY0504","RAY0528","RAY0043", "RAY0517")
+irs.names <- c("Core Composite","F2 Model","BR US Debt","BR Treasury", "PIMCO")
+
+r.irs.list <- list()   
+b.irs.list <- list()
+mv.irs.list <- list()
+ex.irs.list <- list()
+dva.irs.list <- list()
+
+b.agg <- subset(nepc.dat, nepc.dat$ID == "ASRSLEHAGG", select = c('Date','NetReturn'))
+b.agg <- xts(b.agg[ ,-1], b.agg[ ,1])
+b.agg <- b.agg[xts.range, ]
+
+for(c in irs.id) {
+   name <- nepc.map[which(nepc.map$ID == c), 'Short.Name']
+   
+   r <- subset(nepc.dat, nepc.dat$ID == c & nepc.dat$Period == "Monthly", select = c('Date','NetReturn'))
+   r.xts <- xts(r[,-1], r[,1])
+   r.xts <- r.xts[!is.na(r.xts),]
+   r.xts <- r.xts[!duplicated(index(r.xts)), ]
+   r.xts <- r.xts[xts.range,]
+      if (c == "RAY0043"){ r.xts["2015-08-31",] <- NA }           #Long Treasury Adjustment
+      if (c == "RAY0043"){ r.xts["2016-09-30",] <- (-0.01609813) } #Long Treasury Adjustment to benchmark return
+      if (c == "RAY0043"){ r.xts <- r.xts["/2016-10-01",] }       #Long Treasury Adjustment
+      if (c == "RAY0517"){ r.xts <- r.xts["/2014-04-01",] }       #PIMCO Adjustment
+      if (c == "RAY0504"){ r.f2 <- r.xts}
+   r.irs.list[[name]] <- r.xts
+   
+   b.id <- nepc.map[which(nepc.map$ID == c), 'BM.ID']
+   b <- subset(nepc.dat, nepc.dat$ID == b.id, select = c('Date','NetReturn'))
+   b.xts <- xts(b[ ,-1], b[ ,1])
+   b.xts <- b.xts[paste0(i.d,"/"), ]
+   b.xts <- b.xts[xts.range, ]
+      if (c == "RAY0504"){ b.f2 <- b.xts}
+   b.irs.list[[name]] <- b.xts
+   
+   mv <- subset(nepc.dat, nepc.dat$ID == c, select = c('Date','MthEndMV'))
+   mv.xts <- xts(mv[,-1], mv[,1])
+   mv.xts <- mv.xts[!duplicated(index(mv.xts)), ]
+   mv.xts <- mv.xts[xts.range,]
+      if (c == "RAY0043"){ mv.xts <- mv.xts["/2016-10-01",] } #Long Treasury Adjustment
+      if (c == "RAY0504"){ mv.f2 <- mv.xts}
+   mv.qtr <- period.apply(mv.xts, INDEX = endpoints(mv.xts, 'quarters'), FUN = last)
+   mv.irs.list[[name]] <- mv.qtr
+   
+   ex.irs.list[[name]] <- r.xts - b.xts
+   
+   dva.irs.list[[name]] <- lag.xts(mv.xts, 1) * (r.xts - b.agg)
+}
+
+r.irs <- do.call(merge, r.irs.list) %>%
+   apply.quarterly(., FUN = Return.cumulative) %>%
+   set_colnames(irs.names)
+
+b.irs <- do.call(merge, b.irs.list) %>% 
+   apply.quarterly(., FUN = Return.cumulative) %>%
+   set_colnames(irs.names)
+
+mv.irs <- do.call(merge, mv.irs.list) %>%
+   tomillions(.) %>%
+   set_colnames(irs.names)
+
+ex.irs <- do.call(merge, ex.irs.list) %>%
+   apply.quarterly(., FUN = Return.cumulative) %>%
+   set_colnames(irs.names)
+
+dva.irs <- do.call(merge, dva.irs.list) %>% 
+   apply.quarterly(., FUN = colSums) %>%
+   tomillions(.) %>%
+   set_colnames(irs.names)
+```
+
+@knitr irs.return.table
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+irs.name.vector <- c(
+   "Core Composite","Barclay's Aggregate","Core Composite Excess",
+   "F2 Model","Barclay's Aggregate","F2 Excess",
+   "BlackRock US Debt Fund","Barclay's Aggregate","BlackRock Excess"
+)
+
+irs.one.vector <- c(
+   Return.annualized(r.irs[range.1,1]),
+   Return.annualized(b.irs[range.1,1]),
+   Return.annualized(r.irs[range.1,1]) - Return.annualized(b.irs[range.1,1]),
+   
+   Return.annualized(r.irs[range.1,2]),
+   Return.annualized(b.irs[range.1,2]),
+   Return.annualized(r.irs[range.1,2]) - Return.annualized(b.irs[range.1,2]),
+   
+   Return.annualized(r.irs[range.1,3]),
+   Return.annualized(b.irs[range.1,3]),
+   Return.annualized(r.irs[range.1,3]) - Return.annualized(b.irs[range.1,3])
+)
+
+irs.three.vector <- c(
+   Return.annualized(r.irs[range.3,1]),
+   Return.annualized(b.irs[range.3,1]),
+   Return.annualized(r.irs[range.3,1]) - Return.annualized(b.irs[range.3,1]),
+   
+   Return.annualized(r.irs[range.3,2]),
+   Return.annualized(b.irs[range.3,2]),
+   Return.annualized(r.irs[range.3,2]) - Return.annualized(b.irs[range.3,2]),
+   
+   Return.annualized(r.irs[range.3,3]),
+   Return.annualized(b.irs[range.3,3]),
+   Return.annualized(r.irs[range.3,3]) - Return.annualized(b.irs[range.3,3])
+)
+
+irs.five.vector <- c(
+   Return.annualized(r.irs[range.5,1]),
+   Return.annualized(b.irs[range.5,1]),
+   Return.annualized(r.irs[range.5,1]) - Return.annualized(b.irs[range.5,1]),
+   
+   Return.annualized(r.irs[range.5,2]),
+   Return.annualized(b.irs[range.5,2]),
+   Return.annualized(r.irs[range.5,2]) - Return.annualized(b.irs[range.5,2]),
+   
+   Return.annualized(r.irs[range.5,3]),
+   Return.annualized(b.irs[range.5,3]),
+   Return.annualized(r.irs[range.5,3]) - Return.annualized(b.irs[range.5,3])
+)
+
+irs.return.table <- data.frame(
+   irs.name.vector,
+   100 * irs.one.vector,
+   100 * irs.three.vector,
+   100 * irs.five.vector) %>%
+   set_colnames(c("","1 Year", "3 Year", "5 Year")) 
+
+irs.return.table[7:9,4] <- NA #BR US Debt not 5 years
+saveRDS(irs.return.table, file = paste0(path.rds,"irs.return.table"))
+```
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+plot.mv.irs <- ggplot(
+   data = fortify.zoo(mv.irs[range.5,-1]/1000, melt = TRUE),
+   aes(x = Index, y = Value, fill = Series)) +
+   geom_col(position = "stack") +
+   ggtitle("Core Market Values") +
+   ylab("in Billions")  + xlab("") + 
+   scale_x_date(date_breaks = "1 year", labels = date_format("%Y")) +
+   scale_fill_manual(values = IMD.palette()) +
+   guides(fill = guide_legend(title = "")) +
+   theme(plot.title = element_text(hjust = 0.5, size = 10, face = "bold"),
+         plot.subtitle = element_text(hjust = 0.5, size = 10),
+         axis.title.y = element_text(size = 8, face = "italic"),
+         legend.position="bottom", legend.box.spacing = unit(0, "cm"),
+         legend.text = element_text(size = 7), legend.key.size = unit(.25, "cm"),
+         axis.text.x = element_text(size = 6, face = "bold"), axis.text.y = element_text(size = 6, face = "bold"))
+
+saveRDS(plot.mv.irs, file = paste0(path.rds,"plot.mv.irs"))
+print(plot.mv.irs)
+```
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+b.agg.qtr <- apply.quarterly(b.agg, FUN = Return.cumulative)
+
+r.irs.roll <- merge(
+   rollapply(na.trim(r.irs[,2]), width = 4, FUN = "Return.annualized", scale = 4),
+   rollapply(na.trim(r.irs[,3]), width = 4, FUN = "Return.annualized", scale = 4),
+   rollapply(na.trim(r.irs[,1]), width = 4, FUN = "Return.annualized", scale = 4), 
+   rollapply(na.trim(b.agg.qtr), width = 4, FUN = "Return.annualized", scale = 4))
+
+r.irs.roll <- r.irs.roll[range.5,]
+colnames(r.irs.roll) <- c(irs.names[c(2,3,1)], "Barclay's Aggregate")
+
+
+plot.irs.roll <- ggplot(
+   data = fortify.zoo(r.irs.roll, melt = TRUE), 
+   aes(x = Index, y = Value, stat = Series, colour = Series)) +
+   geom_line(size = .5) +
+   xlab("") + scale_y_continuous(name = "Annualized Return", labels = scales::percent) +
+   ggtitle("Core Rolling Returns",
+           subtitle = paste("One Year Trailing Returns through",format(end.date, "%B %d, %Y"))) +
+   scale_color_manual(values = IMD.palette(), name = element_blank()) +
+   theme(plot.title = element_text(hjust = 0.5, size = 8, face = "bold"),
+         plot.subtitle = element_text(hjust = 0.5, size = 6),
+         axis.title.y = element_text(size = 6, face = "italic"), 
+         legend.text = element_text(size = 7), legend.key.size = unit(.25, "cm"),
+         axis.text.x = element_text(size = 6, face = "bold"), axis.text.y = element_text(size = 6, face = "bold"))
+
+saveRDS(plot.irs.roll, file = paste0(path.rds,"plot.irs.roll"))
+print(plot.irs.roll)
+```
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+irs.dva <- apply.quarterly(dva.irs, FUN = "colSums")
+
+plot.irs.dva <- ggplot(
+   data = fortify.zoo(dva.irs[range.5,-1], melt = TRUE),
+   aes(x = Index, y = Value, fill = Series)) +
+   geom_col(position = "stack") +
+   ggtitle("") +
+   ylab("in Millions") + xlab("") + scale_y_continuous(labels = scales::dollar) +
+   scale_fill_manual(values=IMD.palette(), name = "Asset Class:") +
+   scale_x_date(date_breaks = "1 year", labels = date_format("%Y")) +
+   theme(plot.title = element_text(hjust = 0.5, size = 12, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, size = 10),
+        axis.title.y = element_text(size = 10, face = "italic"),
+        legend.background = element_rect(fill="gray92", size=4.5, linetype="dotted"))
+
+
+saveRDS(plot.irs.dva, file = paste0(path.rds,"plot.irs.dva"))
+print(plot.irs.dva)
+```
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+end.qtr <- dim(irs.dva)[1]
+
+irs.dva.summary.long <- data.frame(
+  colSums(irs.dva[(end.qtr- 3):end.qtr, -1], na.rm = TRUE),
+  colSums(irs.dva[(end.qtr-11):end.qtr, -1], na.rm = TRUE),
+  colSums(irs.dva[(end.qtr-19):end.qtr, -1], na.rm = TRUE)
+) %>%
+  set_colnames(c("One Year","Three Year","Five Year")) %>%
+  mutate(Asset.Class = rownames(.)) %>%
+  gather(Period, DVA, -Asset.Class) %>%
+  mutate(Period = factor(Period, levels = c("One Year","Three Year","Five Year"))) %>%
+  mutate(Asset.Class = factor(Asset.Class, levels = c("F2 Model", "BR US Debt", "BR Treasury", "PIMCO")))
+
+plot.irs.dva.long <- ggplot(irs.dva.summary.long, aes(x = Period, y = DVA, fill = Asset.Class)) +
+   geom_bar(stat = "identity") +
+   ggtitle("") +
+   ylab("in Millions") + xlab("") + scale_y_continuous(labels = scales::dollar) +
+   scale_fill_manual(values=IMD.palette(), name = "Asset Class:") +
+   theme(plot.title = element_text(hjust = 0.5, size = 12, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, size = 10),
+        axis.title.y = element_text(size = 10, face = "italic"),
+        legend.background = element_rect(fill="gray92", size=4.5, linetype="dotted"))
+
+saveRDS(plot.irs.dva.long, file = paste0(path.rds,"plot.irs.dva.long"))
+print(plot.irs.dva.long)
+```
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+plot.r.irs.5yr <- ggplot(
+   data = fortify.zoo(r.irs[range.5,-5], melt = TRUE),
+   aes(x = Index, fill = Series, y = Value)) +
+   
+   geom_col(position = "dodge") +
+   ggtitle("Core Quarterly Return") +
+   ylab("") + xlab("") + 
+   scale_y_continuous(name = "Quarterly Return", labels = scales::percent) +
+   scale_x_date(date_breaks = "1 year", labels = date_format("%Y")) +
+   scale_fill_manual(values = IMD.palette()) +
+   guides(fill = guide_legend(title = "")) +
+   theme(plot.title = element_text(hjust = 0.5, size = 8, face = "bold"),
+         plot.subtitle = element_text(hjust = 0.5, size = 8),
+         axis.title.y = element_text(size = 7, face = "italic"),
+         legend.position="bottom", legend.box.spacing = unit(0, "cm"),
+         legend.text = element_text(size = 7), legend.key.size = unit(.25, "cm"),
+         axis.text.x = element_text(size = 6, face = "bold"), axis.text.y = element_text(size = 6, face = "bold"))
+
+saveRDS(plot.r.irs.5yr, file = paste0(path.rds,"plot.r.irs.5yr"))
+print(plot.r.irs.5yr)
+```
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+plot.ex.irs.5yr <- ggplot(
+   data = fortify.zoo(ex.irs[range.5,-5], melt = TRUE),
+   aes(x = Index, fill = Series, y = Value)) +
+   
+   geom_col(position = "dodge") +
+   ggtitle("Core Quarterly Excess Return") +
+   ylab("") + xlab("") + 
+   scale_y_continuous(name = "Excess Return", labels = scales::percent) +
+   scale_x_date(date_breaks = "1 year", labels = date_format("%Y")) +
+   scale_fill_manual(values = IMD.palette()) +
+   guides(fill = guide_legend(title = "")) +
+   theme(plot.title = element_text(hjust = 0.5, size = 8, face = "bold"),
+         plot.subtitle = element_text(hjust = 0.5, size = 8),
+         axis.title.y = element_text(size = 7, face = "italic"),
+         legend.position="", legend.text = element_text(size = 8), legend.key.size = unit(.25, "cm"),
+         axis.text.x = element_text(size = 6, face = "bold"), axis.text.y = element_text(size = 6, face = "bold"))
+
+saveRDS(plot.ex.irs.5yr, file = paste0(path.rds,"plot.ex.irs.5yr"))
+print(plot.ex.irs.5yr)
+```
+
+F2 Cone Chart
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+exp.return = 1 + 10/10000
+exp.sd = 25/10000
+
+cone.data <- r.f2 - b.f2
+colnames(cone.data) <- " Excess"
+start.date = index(cone.data)[1]
+end.date = index(cone.data)[length(cone.data)]
+
+cone.data$r.act <- cumprod(1 + cone.data)
+cone.data$r.exp <- cumprod(rep(exp.return ^ (1/12),dim(cone.data)[1]))
+sd.one <- exp.sd * sqrt((1:dim(cone.data)[1]/12))
+
+cone.data$up.one = cone.data$r.exp * (1 + sd.one)
+cone.data$up.two = cone.data$r.exp * (1 + 2*sd.one)
+cone.data$dn.one = cone.data$r.exp / (1 + sd.one)
+cone.data$dn.two = cone.data$r.exp / (1 + 2*sd.one)
+
+one.row = xts(matrix(c(0, rep(1, ncol(cone.data) - 1)), nrow = 1), order.by = start.date + 1 - months(1) - 1)
+cone.data <- rbind.xts(cone.data, one.row)
+
+plot.cone = ggplot(
+   data = fortify.zoo(cone.data[,c(2:7)] - 1, melt = TRUE),
+   aes(x = Index, y = Value, stat= Series, colour = Series)
+)
+
+plot.cone + geom_line(size=1) + 
+   scale_y_continuous(labels = scales::percent)  + 
+   labs(x="",y ="Excess Return") + 
+   ggtitle("F2 Portfolio Perfromance versus Expecations",
+           subtitle = "10bps Expected Excess Return with 25bps Expected Trancing Error") +
+   scale_color_manual(values = c("dodgerblue4","grey50","grey70","grey50","grey70","grey50")) +
+   theme(plot.title = element_text(hjust = 0.5, size = 8, face = "bold"),
+         plot.subtitle = element_text(hjust = 0.5, size = 6),
+         axis.title.y = element_text(size = 6, face = "italic"), 
+         legend.text = element_text(size = 7), legend.key.size = unit(.25, "cm"),
+         axis.text.x = element_text(size = 6, face = "bold"), axis.text.y = element_text(size = 6, face = "bold")) + 
+   theme(legend.position = 0)
+```
+
+
+High Yield Data
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+hy.id <- c("RAY0035","RAY0512","RAYACHY1","RAY0513")
+hy.names <- c("High Yield Composite","Columbia","JP Morgan","Shenkman")
+
+r.hy.list <- list()   
+b.hy.list <- list()
+mv.hy.list <- list()
+ex.hy.list <- list()
+id.hy.list <- list()
+dva.hy.list <- list()
+
+for(c in hy.id) {
+   name <- nepc.map[which(nepc.map$ID == c), 'Short.Name']
+   
+   r <- subset(nepc.dat, nepc.dat$ID == c & nepc.dat$Period == "Monthly", select = c('Date','NetReturn'))
+   r.xts <- xts(r[,-1], r[,1])
+   r.xts <- r.xts[!is.na(r.xts),]
+   r.xts <- r.xts[!duplicated(index(r.xts)), ]
+   r.xts <- r.xts[xts.range,]
+   r.hy.list[[name]] <- r.xts
+   
+   b.id <- nepc.map[which(nepc.map$ID == c), 'BM.ID']
+   b <- subset(nepc.dat, nepc.dat$ID == b.id, select = c('Date','NetReturn'))
+   b.xts <- xts(b[ ,-1], b[ ,1])
+   b.xts <- b.xts[paste0(i.d,"/"), ]
+   b.xts <- b.xts[xts.range, ]
+   b.hy.list[[name]] <- b.xts
+   
+   mv <- subset(nepc.dat, nepc.dat$ID == c, select = c('Date','MthEndMV'))
+   mv.xts <- xts(mv[,-1], mv[,1])
+   mv.xts <- mv.xts[!duplicated(index(mv.xts)), ]
+   mv.xts <- mv.xts[xts.range,]
+         if (c == "RAY0513"){ mv.xts <- mv.xts["/2014-07-01",] } #Long Treasury Adjustment
+   mv.qtr <- period.apply(mv.xts, INDEX = endpoints(mv.xts, 'quarters'), FUN = last)
+   mv.hy.list[[name]] <- mv.qtr
+   
+   ex.hy.list[[name]] <- r.xts - b.xts
+   
+   dva.hy.list[[name]] <- lag(mv.xts, 1) * (r.xts - b.xts)
+   
+   id.hy.list[[name]] <- ymd(i.d)
+}
+
+r.hy <- do.call(merge, r.hy.list) %>% 
+   apply.quarterly(., FUN = Return.cumulative) %>%
+   set_colnames(hy.names)
+
+b.hy <- do.call(merge, b.hy.list) %>%
+   apply.quarterly(., FUN = Return.cumulative) %>%
+   set_colnames(hy.names)
+
+mv.hy <- do.call(merge, mv.hy.list) %>%
+   tomillions(.) %>%
+   set_colnames(hy.names)
+
+ex.hy <- do.call(merge, ex.hy.list) %>% 
+   apply.quarterly(., FUN = Return.cumulative) %>%
+   set_colnames(hy.names)
+
+dva.hy <- do.call(merge, dva.hy.list) %>% 
+   apply.quarterly(., FUN = colSums, na.rm = TRUE) %>%
+   tomillions(.) %>%
+   set_colnames(hy.names)
+```
+
+hy.return.table
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+hy.name.vector <- c(
+   "High Yield Composite","Barclay's HY Index","Composite Excess",
+   "Columbia","Barclay's HY Index","Columbia Excess",
+   "JP Morgan","Barclay's HY Index","JP Morgan Excess"
+)
+hy.one.vector <- c(
+   Return.annualized(r.hy[range.1,1]),
+   Return.annualized(b.hy[range.1,1]),
+   Return.annualized(r.hy[range.1,1]) - Return.annualized(b.hy[range.1,1]),
+   
+   Return.annualized(r.hy[range.1,2]),
+   Return.annualized(b.hy[range.1,2]),
+   Return.annualized(r.hy[range.1,2]) - Return.annualized(b.hy[range.1,2]),
+   
+   Return.annualized(r.hy[range.1,3]),
+   Return.annualized(b.hy[range.1,3]),
+   Return.annualized(r.hy[range.1,3]) - Return.annualized(b.hy[range.1,3])
+)
+
+hy.three.vector <- c(
+   Return.annualized(r.hy[range.3,1]),
+   Return.annualized(b.hy[range.3,1]),
+   Return.annualized(r.hy[range.3,1]) - Return.annualized(b.hy[range.3,1]),
+   
+   Return.annualized(r.hy[range.3,2]),
+   Return.annualized(b.hy[range.3,2]),
+   Return.annualized(r.hy[range.3,2]) - Return.annualized(b.hy[range.3,2]),
+   
+   Return.annualized(r.hy[range.3,3]),
+   Return.annualized(b.hy[range.3,3]),
+   Return.annualized(r.hy[range.3,3]) - Return.annualized(b.hy[range.3,3])
+)
+
+hy.five.vector <- c(
+   Return.annualized(r.hy[range.5,1]),
+   Return.annualized(b.hy[range.5,1]),
+   Return.annualized(r.hy[range.5,1]) - Return.annualized(b.hy[range.5,1]),
+   
+   Return.annualized(r.hy[range.5,2]),
+   Return.annualized(b.hy[range.5,2]),
+   Return.annualized(r.hy[range.5,2]) - Return.annualized(b.hy[range.5,2]),
+   
+   Return.annualized(r.hy[range.5,3]),
+   Return.annualized(b.hy[range.5,3]),
+   Return.annualized(r.hy[range.5,3]) - Return.annualized(b.hy[range.5,3])
+)
+
+hy.return.table <- data.frame(
+   hy.name.vector,
+   100 * hy.one.vector,
+   100 * hy.three.vector,
+   100 * hy.five.vector) %>%
+   set_colnames(c("","1 Year", "3 Year", "5 Year")) 
+
+hy.return.table[7:9,4] <- NA #JP Morgan not 5 years
+saveRDS(hy.return.table, file = paste0(path.rds,"hy.return.table"))
+```
+
+plot.mv.hy
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+plot.mv.hy <- ggplot(
+   data = fortify.zoo(mv.hy[range.5,-1]/1000, melt = TRUE),
+   aes(x = Index, y = Value, fill = Series)) +
+   geom_col(position = "stack") +
+   ggtitle("High Yield Market Values") +
+   ylab("in Billions")  + xlab("") + 
+   scale_x_date(date_breaks = "1 year", labels = date_format("%Y")) +
+   scale_fill_manual(values = IMD.palette()) +
+   guides(fill = guide_legend(title = "")) +
+   theme(plot.title = element_text(hjust = 0.5, size = 10, face = "bold"),
+         plot.subtitle = element_text(hjust = 0.5, size = 10),
+         axis.title.y = element_text(size = 8, face = "italic"),
+         legend.position="bottom", legend.box.spacing = unit(0, "cm"),
+         legend.text = element_text(size = 7), legend.key.size = unit(.25, "cm"),
+         axis.text.x = element_text(size = 6, face = "bold"), axis.text.y = element_text(size = 6, face = "bold"))
+
+saveRDS(plot.mv.hy, file = paste0(path.rds,"plot.mv.hy"))
+print(plot.mv.hy)
+```
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+plot.hy.dva <- ggplot(
+   data = fortify.zoo(dva.hy[range.5,-1], melt = TRUE),
+   aes(x = Index, y = Value, fill = Series)) +
+   geom_col(position = "stack") +
+   ggtitle("") +
+   ylab("in Millions") + xlab("") + scale_y_continuous(labels = scales::dollar) +
+   scale_fill_manual(values=IMD.palette(), name = "Asset Class:") +
+   scale_x_date(date_breaks = "1 year", labels = date_format("%Y")) +
+   theme(plot.title = element_text(hjust = 0.5, size = 12, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, size = 10),
+        axis.title.y = element_text(size = 10, face = "italic"),
+        legend.background = element_rect(fill="gray92", size=4.5, linetype="dotted"))
+
+
+saveRDS(plot.hy.dva, file = paste0(path.rds,"plot.hy.dva"))
+print(plot.hy.dva)
+```
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+end.qtr <- dim(dva.hy)[1]
+
+hy.dva.summary.long <- data.frame(
+  colSums(dva.hy[(end.qtr- 3):end.qtr, -1], na.rm = TRUE),
+  colSums(dva.hy[(end.qtr-11):end.qtr, -1], na.rm = TRUE),
+  colSums(dva.hy[(end.qtr-19):end.qtr, -1], na.rm = TRUE)
+) %>%
+  set_colnames(c("One Year","Three Year","Five Year")) %>%
+  mutate(Asset.Class = rownames(.)) %>%
+  gather(Period, DVA, -Asset.Class) %>%
+  mutate(Period = factor(Period, levels = c("One Year","Three Year","Five Year"))) %>%
+  mutate(Asset.Class = factor(Asset.Class, levels = c("Columbia","JP Morgan","Shenkman")))
+
+plot.hy.dva.long <- ggplot(hy.dva.summary.long, aes(x = Period, y = DVA, fill = Asset.Class)) +
+   geom_bar(stat = "identity") +
+   ggtitle("") +
+   ylab("in Millions") + xlab("") + scale_y_continuous(labels = scales::dollar) +
+   scale_fill_manual(values=IMD.palette(), name = "Fund:") +
+   theme(plot.title = element_text(hjust = 0.5, size = 12, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, size = 10),
+        axis.title.y = element_text(size = 10, face = "italic"),
+        legend.background = element_rect(fill="gray92", size=4.5, linetype="dotted"))
+
+saveRDS(plot.hy.dva.long, file = paste0(path.rds,"plot.hy.dva.long"))
+print(plot.hy.dva.long)
+```
+
+plot.hy.roll
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+hy.index.qtr <- apply.quarterly(b.hy[,1], FUN = Return.cumulative)
+
+r.hy.roll <- merge(
+   rollapply(na.trim(r.hy[,2]), width = 4, FUN = "Return.annualized", scale = 4),
+   rollapply(na.trim(r.hy[,3]), width = 4, FUN = "Return.annualized", scale = 4),
+   rollapply(na.trim(r.hy[,1]), width = 4, FUN = "Return.annualized", scale = 4),
+   rollapply(na.trim(hy.index.qtr[,1]), width = 4, FUN = "Return.annualized", scale = 4))
+
+r.hy.roll <- r.hy.roll[range.5,]
+colnames(r.hy.roll) <- c(hy.names[c(2,3,1)], "Barclay's HY Index")
+
+
+plot.hy.roll <- ggplot(
+   data = fortify.zoo(r.hy.roll, melt = TRUE), 
+   aes(x = Index, y = Value, stat = Series, colour = Series)) +
+   geom_line(size = .5) +
+   xlab("") + scale_y_continuous(name = "Annualized Return", labels = scales::percent) +
+   ggtitle("High Yield Rolling Returns",
+           subtitle = paste("One Year Trailing Returns through",format(end.date, "%B %d, %Y"))) +
+   scale_color_manual(values = IMD.palette(), name = element_blank()) +
+   theme(plot.title = element_text(hjust = 0.5, size = 8, face = "bold"),
+         plot.subtitle = element_text(hjust = 0.5, size = 6),
+         axis.title.y = element_text(size = 6, face = "italic"), 
+         legend.text = element_text(size = 7), legend.key.size = unit(.25, "cm"),
+         axis.text.x = element_text(size = 6, face = "bold"), axis.text.y = element_text(size = 6, face = "bold"))
+saveRDS(plot.hy.roll, file = paste0(path.rds,"plot.hy.roll"))
+print(plot.hy.roll)
+```
+
+plot.r.hy.5yr
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+plot.r.hy.5yr <- ggplot(
+   data = fortify.zoo(r.hy[range.5,-4], melt = TRUE),
+   aes(x = Index, fill = Series, y = Value)) +
+   
+   geom_col(position = "dodge") +
+   ggtitle("High Yield Quarterly Return") +
+   ylab("") + xlab("") + 
+   scale_y_continuous(name = "Quarterly Return", labels = scales::percent) +
+   scale_x_date(date_breaks = "1 year", labels = date_format("%Y")) +
+   scale_fill_manual(values = IMD.palette()) +
+   guides(fill = guide_legend(title = "")) +
+   theme(plot.title = element_text(hjust = 0.5, size = 8, face = "bold"),
+         plot.subtitle = element_text(hjust = 0.5, size = 8),
+         axis.title.y = element_text(size = 8, face = "italic"),
+         legend.position="bottom", legend.box.spacing = unit(0, "cm"),
+         legend.text = element_text(size = 7), legend.key.size = unit(.25, "cm"),
+         axis.text.x = element_text(size = 6, face = "bold"), axis.text.y = element_text(size = 6, face = "bold"))
+saveRDS(plot.r.hy.5yr, file = paste0(path.rds,"plot.r.hy.5yr"))
+print(plot.r.hy.5yr)
+```
+
+plot.ex.hy.5yr
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+plot.ex.hy.5yr <- ggplot(
+   data = fortify.zoo(ex.hy[range.5,-4], melt = TRUE),
+   aes(x = Index, fill = Series, y = Value)) +
+   
+   geom_col(position = "dodge") +
+   ggtitle("High Yield Quarterly Excess Return") +
+   ylab("") + xlab("") + 
+   scale_y_continuous(name = "Excess Return", labels = scales::percent) +
+   scale_x_date(date_breaks = "1 year", labels = date_format("%Y")) +
+   scale_fill_manual(values = IMD.palette()) +
+   guides(fill = guide_legend(title = "")) +
+   theme(plot.title = element_text(hjust = 0.5, size = 8, face = "bold"),
+         plot.subtitle = element_text(hjust = 0.5, size = 8),
+         axis.title.y = element_text(size = 8, face = "italic"),
+         legend.position="", legend.text = element_text(size = 8), legend.key.size = unit(.25, "cm"),
+         axis.text.x = element_text(size = 6, face = "bold"), axis.text.y = element_text(size = 6, face = "bold"))
+saveRDS(plot.ex.hy.5yr, file = paste0(path.rds,"plot.ex.hy.5yr"))
+print(plot.ex.hy.5yr)
+```
+
+plot.pd.pme
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+#JD.palette <- c("#af1313", "#d86868", "#d6c126", "#7b9ad1", "#0720b2")
+
+pd.index <- c(
+   match("Total PD", rownames(pme.df)),
+   which(pme.df$isfund & pme.df$Portfolio == "PD"))
+
+pd.long.names <- rownames(pme.df[pd.index,])
+pd.short.name <- pme.df$name[pd.index]
+
+IRR <- round(pme.df$`Fund IRR`[pd.index], 3)
+PME <- round(pme.df$`Lev Loan+250 PME`[pd.index], 2)
+TVPI <- round(pme.df$`Fund TVPI`[pd.index], 2)
+PME.cut <- cut(
+   x = PME, 
+   breaks = c(-Inf, .8, .95, 1.05, 1.2, +Inf),
+   labels = c("< 0.80", "0.80 to 0.95", "0.95 to 1.05", "1.05 to 1.20", "> 1.20")
+   )
+
+pd.pme.data <- na.omit(data.frame(Fund = pd.short.name, TVPI, IRR, PME, PME.cut))
+pd.pme.data <- pd.pme.data[-2,]
+
+plot.pd.pme <- ggplot(pd.pme.data, aes(x = TVPI, y = IRR, color = PME.cut)) +
+   geom_text_repel(aes(label = Fund), show.legend = FALSE) +
+   geom_point(size = 2) +
+   scale_color_manual(drop = FALSE, values = PME.palette()) + 
+   xlab("TVPI")+ scale_y_continuous(name="IRR", labels=percent) +
+   ggtitle(paste("Comparison of Private Debt Strategies")) + 
+   labs(color = "PME:") + 
+   theme(plot.title = element_text(hjust = 0.5)) + 
+   guides(colour = guide_legend(reverse = T))
+
+saveRDS(plot.pd.pme, file = paste0(path.rds,"plot.pd.pme"))
+print(plot.pd.pme)
+```
+
+pd.irr.table
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+pd.irr.qtr.lag <- readRDS(paste0(path.rds,"pd.irr.qtr.lag.rds"))
+pd.irr.year.lag <- readRDS(paste0(path.rds,"pd.irr.year.lag.rds"))
+pd.irr.three.lag <- readRDS(paste0(path.rds,"pd.irr.three.lag.rds"))
+pd.irr.itd.lag <- readRDS(paste0(path.rds,"pd.irr.itd.lag.rds"))
+
+pd.irr.table <- cbind(
+   round(100 * t(pd.irr.qtr.lag[end.date,]), digits = 1),
+   round(100 * t(pd.irr.year.lag[end.date,]), digits = 1),
+   round(100 * t(pd.irr.three.lag[end.date,]), digits = 1),
+   round(100 * t(pd.irr.itd.lag[end.date,]), digits = 1)
+) %>% set_colnames(c("QTR", "1 YEAR", "3 YEAR", "  ITD"))
+
+saveRDS(pd.irr.table, file = paste0(path.rds,"pd.irr.table"))
+```
+
+plot.mv.pd
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+plot.mv.pd <- ggplot(
+   data = fortify.zoo(pd.cf.adj[range.5,-1]/1000000000, melt = TRUE),
+   aes(x = Index, y = Value, fill = Series)) +
+   geom_col(position = "stack") +
+   ggtitle("Private Debt Market Values") +
+   ylab("in Billions")  + xlab("") + 
+   scale_x_date(date_breaks = "1 year", labels = date_format("%Y")) +
+   scale_fill_manual(values = IMD.palette()) +
+   guides(fill = guide_legend(title = "")) +
+   theme(plot.title = element_text(hjust = 0.5, size = 10, face = "bold"),
+         plot.subtitle = element_text(hjust = 0.5, size = 10),
+         axis.title.y = element_text(size = 8, face = "italic"),
+         legend.position="bottom", legend.box.spacing = unit(0, "cm"),
+         legend.text = element_text(size = 7), legend.key.size = unit(.25, "cm"),
+         axis.text.x = element_text(size = 6, face = "bold"), axis.text.y = element_text(size = 6, face = "bold"))
+
+saveRDS(plot.mv.pd, file = paste0(path.rds,"plot.mv.pd"))
+print(plot.mv.pd)
+```
+
+plot.od.pme
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+## @knitr plot.od.pme
+JD.palette <- c("#af1313", "#d86868", "#d6c126", "#4b8bd1", "#0720b2")
+
+od.index <- c(
+   match("Total OPP", rownames(pme.df)),
+   which(pme.df$isfund & pme.df$Portfolio == "OPP" & pme.df$`Cash Adj NAV` > 5000000))
+
+od.long.names <- rownames(pme.df[od.index,])
+od.short.name <- pme.df$name[od.index]
+
+IRR <- round(pme.df$`Fund IRR`[od.index], 3)
+NAV <- pme.df$`Cash Adj NAV`[od.index]
+PME <- round(pme.df$`Lev Loan+250 PME`[od.index], 2)
+TVPI <- round(pme.df$`Fund TVPI`[od.index], 2)
+PME.cut <- cut(
+   x = PME, 
+   breaks = c(-Inf, .8, .95, 1.05, 1.2, +Inf),
+   labels = c("< 0.80", "0.80 to 0.95", "0.95 to 1.05", "1.05 to 1.20", "> 1.20")
+   )
+
+od.pme.data <- na.omit(data.frame(Fund = od.short.name, TVPI, IRR, NAV, PME, PME.cut))
+
+plot.od.pme <- ggplot(od.pme.data, aes(x = TVPI, y = IRR, color = PME.cut)) +
+   geom_text_repel(aes(label = Fund), show.legend = FALSE) +
+   geom_point(size = 2) +
+   geom_point() +
+   scale_color_manual(drop = FALSE, values = PME.palette()) + 
+   xlab("TVPI")+ scale_y_continuous(name="IRR", labels=percent) +
+   ggtitle(paste("Comparison of Opportunistic Debt Strategies")) + 
+   labs(color = "PME:") + 
+   theme(plot.title = element_text(hjust = 0.5)) + 
+   guides(colour = guide_legend(reverse = T))
+
+saveRDS(plot.od.pme, file = paste0(path.rds,"plot.od.pme"))
+print(plot.od.pme)
+```
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+od.irr.qtr.lag <- readRDS(paste0(path.rds,"od.irr.qtr.lag.rds"))
+od.irr.year.lag <- readRDS(paste0(path.rds,"od.irr.year.lag.rds"))
+od.irr.three.lag <- readRDS(paste0(path.rds,"od.irr.three.lag.rds"))
+od.irr.itd.lag <- readRDS(paste0(path.rds,"od.irr.itd.lag.rds"))
+
+od.irr.table <- cbind(
+   round(100 * t(od.irr.qtr.lag[end.date,]), digits = 1),
+   round(100 * t(od.irr.year.lag[end.date,]), digits = 1),
+   round(100 * t(od.irr.three.lag[end.date,]), digits = 1),
+   round(100 * t(od.irr.itd.lag[end.date,]), digits = 1)
+) %>% set_colnames(c("QTR", "1 YEAR", "3 YEAR", "  ITD"))
+
+od.irr.table <- od.irr.table[c("Total.OPP", "Benchmark", od.short.name[-1]),]
+saveRDS(od.irr.table, file = paste0(path.rds,"od.irr.table"))
+```
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+od.active <- od.cf.adj[,colnames(od.cf.adj) %in% od.short.name]
+od.other <- od.cf.adj[,!(colnames(od.cf.adj) %in% od.short.name)]
+od.mv.plot <- cbind(od.active, rowSums(od.other, na.rm = T))
+colnames(od.mv.plot) <- c(colnames(od.active), "Other")
+
+test <- od.cf.adj[,colnames(od.cf.adj) %in% od.short.name]
+
+plot.mv.od <- ggplot(
+   data = fortify.zoo(od.mv.plot[range.5,-1]/1000000000, melt = TRUE),
+   aes(x = Index, y = Value, fill = Series)) +
+   geom_col(position = "stack") +
+   ggtitle("Opportunistic Debt Market Values") +
+   ylab("in Billions")  + xlab("") + 
+   scale_x_date(date_breaks = "1 year", labels = date_format("%Y")) +
+   scale_fill_manual(values = IMD.palette()) +
+   guides(fill = guide_legend(title = "")) +
+   theme(plot.title = element_text(hjust = 0.5, size = 10, face = "bold"),
+         plot.subtitle = element_text(hjust = 0.5, size = 10),
+         axis.title.y = element_text(size = 8, face = "italic"),
+         legend.position="bottom", legend.box.spacing = unit(0, "cm"),
+         legend.text = element_text(size = 7), legend.key.size = unit(.25, "cm"),
+         axis.text.x = element_text(size = 6, face = "bold"), axis.text.y = element_text(size = 6, face = "bold"))
+
+saveRDS(plot.mv.od, file = paste0(path.rds,"plot.mv.od"))
+print(plot.mv.od)
+```
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+pd.names <- data.frame("ID" = pd.short.name, "Name" = pd.long.names) %>% .[-1,]
+saveRDS(pd.names, file = paste0(path.rds,"pd.names"))
+```
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+od.names <- data.frame("ID" = od.short.name, "Name" = od.long.names) %>% .[-1,]
+saveRDS(od.names, file = paste0(path.rds,"od.names"))
+```
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+od.irr.qtr <- readRDS(paste0(path.rds,"od.irr.qtr.rds"))
+od.irr.year <- readRDS(paste0(path.rds,"od.irr.year.rds"))
+od.irr.three <- readRDS(paste0(path.rds,"od.irr.three.rds"))
+od.irr.itd <- readRDS(paste0(path.rds,"od.irr.itd.rds"))
+
+test.range <- paste0(end.date %m-% months(3),"/",end.date)
+
+t(round(cbind(od.pcaps[end.date,1], Benchmark = NA, od.pcaps[end.date,-1])/1000000, 2))
+
+end.date.nav <- t(round(cbind(
+   od.pcaps[test.range,1],
+   Benchmark = NA,
+   od.pcaps[end.date,-1])/1000000, 2)
+)
+end.date.irr <- t(round(100*od.irr.qtr[end.date,],2))
+
+od.current.df <- cbind(end.date.nav, end.date.irr)
+colnames(od.current.df) <- c("NAV", "IRR")
+
+subset(od.current.df, rownames(od.current.df) %in% c("Total.OPP", "Benchmark", od.short.name))
+
+subset(t(tail(od.irr.qtr)), row.names(.) == "VIDA2")
+
+tail(od.irr.qtr.lag[,which(colnames(od.irr.qtr.lag) %in% od.short.name == T)])
+
+```
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+
+```
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
